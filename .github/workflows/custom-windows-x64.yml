@@ -1,0 +1,77 @@
+name: Build PhotoCraft custom Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["custom-0.7.1"]
+    paths:
+      - ".github/workflows/custom-windows-x64.yml"
+      - "custom-0.7.1.patch"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
+  CRAFT_FONTS_REF: abb83316d96aa59c1cf64784289e378fe9fa5695
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply custom patch
+        shell: pwsh
+        run: |
+          git apply --check custom-0.7.1.patch
+          git apply custom-0.7.1.patch
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set custom version
+        shell: pwsh
+        run: cargo xtask version set 0.7.1-custom.1
+
+      - name: Check out craft-fonts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: storytold/craft-fonts
+          ref: ${{ env.CRAFT_FONTS_REF }}
+          path: craft-fonts
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: custom-windows-x64
+
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+
+      - name: Compile and test patch
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked -p photocraft-engine quick_mask_options_persist_across_sessions
+          cargo test --locked -p photocraft-ui-egui quick_mask_ui
+          cargo check --locked -p photocraft
+
+      - name: Build MSI and portable ZIP
+        shell: pwsh
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: ./packaging/windows/package.ps1 -Arch x64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-0.7.1-custom.1-windows-x64
+          path: dist/release/*
+          if-no-files-found: error
