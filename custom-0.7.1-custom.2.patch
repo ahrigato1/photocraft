@@ -1,0 +1,151 @@
+diff --git a/crates/engine/src/brush_cmds.rs b/crates/engine/src/brush_cmds.rs
+index a0a217c..71f1fc7 100644
+--- a/crates/engine/src/brush_cmds.rs
++++ b/crates/engine/src/brush_cmds.rs
+@@ -232,7 +232,8 @@ fn damage_json(s: &mut Session, dmg: Rect) -> Value {
+ fn stroke_target(s: &Session, p: &Value, brush: BrushSettings) -> Result<(Option<photocraft_doc::LayerId>, BrushSettings, f32)> {
+     let gray = is_mask_target(p) || crate::channel_cmds::is_channel_target(p);
+     let id = if crate::channel_cmds::is_channel_target(p) { None } else { Some(layer_id(s, p)?) };
+-    let brush = if gray && brush.erase { BrushSettings { erase: false, color: s.tools.background, ..brush } } else { brush };
++    let mut brush = if gray && brush.erase { BrushSettings { erase: false, color: s.tools.background, ..brush } } else { brush };
++    brush.color = crate::channel_cmds::quick_mask_paint_color(s, p, brush.color);
+     Ok((id, brush, num(p, "zoom").unwrap_or(1.0)))
+ }
+ 
+diff --git a/crates/engine/src/brush_cmds/tests.rs b/crates/engine/src/brush_cmds/tests.rs
+index dc392c2..824f070 100644
+--- a/crates/engine/src/brush_cmds/tests.rs
++++ b/crates/engine/src/brush_cmds/tests.rs
+@@ -740,3 +740,31 @@ fn strokes_convert_through_the_documents_cmyk_profile() {
+     let untagged = ink(&surface(&plain));
+     assert!(tagged != untagged, "the document's CMYK profile must convert the painted ink: {tagged:?} vs {untagged:?}");
+ }
++
++#[test]
++fn quick_mask_selected_areas_reverses_black_white_paint_polarity() {
++    use photocraft_doc::ColorIndicates;
++
++    let mut s = session(32, 32);
++    s.quick_mask_options.indicates = ColorIndicates::SelectedAreas;
++    s.execute("select.editInQuickMaskMode", json!({"on": true})).unwrap();
++    s.execute("tools.setColors", json!({"foreground": "#000000", "background": "#ffffff"})).unwrap();
++
++    // Selected Areas: black adds selection, so PhotoCraft's internal white=selected Quick Mask
++    // receives white. White paint then removes that selection (writes black).
++    s.execute(
++        "paint.stroke",
++        json!({"points": [[8, 8], [8, 8]], "size": 5, "hardness": 1, "color": "#000000", "target": "quickMask"}),
++    )
++    .unwrap();
++    let white = s.active().unwrap().doc.quick_mask.as_ref().unwrap().surface.pixel(8, 8)[0];
++    assert!(white > 0.9, "black should add selection in Selected Areas mode, got {white}");
++
++    s.execute(
++        "paint.stroke",
++        json!({"points": [[8, 8], [8, 8]], "size": 5, "hardness": 1, "color": "#ffffff", "target": "quickMask"}),
++    )
++    .unwrap();
++    let black = s.active().unwrap().doc.quick_mask.as_ref().unwrap().surface.pixel(8, 8)[0];
++    assert!(black < 0.1, "white should remove selection in Selected Areas mode, got {black}");
++}
+diff --git a/crates/engine/src/channel_cmds.rs b/crates/engine/src/channel_cmds.rs
+index 428e162..770f9fc 100644
+--- a/crates/engine/src/channel_cmds.rs
++++ b/crates/engine/src/channel_cmds.rs
+@@ -504,6 +504,18 @@ pub(crate) fn is_channel_target(p: &Value) -> bool {
+     matches!(target_of(p), Target::Alpha(_) | Target::QuickMask)
+ }
+ 
++/// Photoshop's Quick Mask painting polarity follows "Color Indicates". Internally PhotoCraft
++/// always stores white = selected; when the overlay indicates Selected Areas, black paint must
++/// therefore write white into the Quick Mask (and white paint must write black).
++pub(crate) fn quick_mask_paint_color(s: &Session, p: &Value, mut color: [f32; 4]) -> [f32; 4] {
++    if target_of(p) == Target::QuickMask && s.quick_mask_options.indicates == ColorIndicates::SelectedAreas {
++        color[0] = 1.0 - color[0];
++        color[1] = 1.0 - color[1];
++        color[2] = 1.0 - color[2];
++    }
++    color
++}
++
+ /// The surface a pixel command writes to and whether the layer's transparency is locked.
+ pub(crate) fn target_surface<'a>(doc: &'a mut Document, layer: Option<LayerId>, p: &Value) -> Result<(&'a mut Surface, bool)> {
+     match target_of(p) {
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 9bb8d99..430def3 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -500,6 +500,9 @@ pub struct PhotocraftApp {
+     /// A toolbar Quick Mask click held briefly so a second click can open Quick Mask Options
+     /// without the first click toggling Quick Mask mode.
+     quick_mask_single_click_at: Option<f64>,
++    /// Foreground/background colours to restore when Quick Mask exits. Photoshop temporarily
++    /// presents a black/white pair while Quick Mask is active instead of reusing image colours.
++    quick_mask_saved_colors: Option<[[f32; 4]; 2]>,
+     /// Windows fallback for a winit/egui edge case where file-hover events arrive but the final
+     /// dropped-file event does not. We only synthesize an open on the empty workspace.
+     windows_hovered_drop_paths: Vec<String>,
+@@ -670,6 +673,7 @@ impl PhotocraftApp {
+             drop_canvas_rect: None,
+             tab_strip: None,
+             quick_mask_single_click_at: None,
++            quick_mask_saved_colors: None,
+             windows_hovered_drop_paths: Vec::new(),
+             drop_places: Default::default(),
+             view_docs: Vec::new(),
+@@ -1624,8 +1628,26 @@ impl PhotocraftApp {
+                 self.ui.mask_target = false;
+             }
+         }
++
++        let quick_mask = self.session.active().is_some_and(|st| st.doc.quick_mask.is_some());
+         let mask = self.layer_mask_targeted();
+-        self.session.tools.target_mask(mask);
++        if quick_mask {
++            // Quick Mask is a grayscale editing target, but it is not a layer mask. Photoshop
++            // temporarily switches the toolbox swatches to black/white and restores the image
++            // colours on exit. Keep that state separate from ToolState's layer-mask colour pair.
++            self.session.tools.target_mask(false);
++            if self.quick_mask_saved_colors.is_none() {
++                self.quick_mask_saved_colors = Some([self.session.tools.foreground, self.session.tools.background]);
++                self.session.tools.foreground = [0.0, 0.0, 0.0, 1.0];
++                self.session.tools.background = [1.0, 1.0, 1.0, 1.0];
++            }
++        } else {
++            if let Some([fg, bg]) = self.quick_mask_saved_colors.take() {
++                self.session.tools.foreground = fg;
++                self.session.tools.background = bg;
++            }
++            self.session.tools.target_mask(mask);
++        }
+     }
+ 
+     fn prune_thumbs(&mut self) {
+diff --git a/crates/ui-egui/src/quick_mask_ui.rs b/crates/ui-egui/src/quick_mask_ui.rs
+index 877a5d4..1c4c036 100644
+--- a/crates/ui-egui/src/quick_mask_ui.rs
++++ b/crates/ui-egui/src/quick_mask_ui.rs
+@@ -92,4 +92,23 @@ mod tests {
+         assert_eq!(f["opacity"], 37.0);
+         assert_eq!(f["channel"], "quickMask");
+     }
++
++    #[test]
++    fn quick_mask_uses_black_white_swatches_and_restores_image_colors() {
++        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
++        app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
++        app.run("tools.setColors", json!({"foreground": "#123456", "background": "#abcdef"})).unwrap();
++        let image_colors = [app.session.tools.foreground, app.session.tools.background];
++
++        app.run("select.editInQuickMaskMode", json!({"on": true})).unwrap();
++        assert_eq!(app.session.tools.foreground, [0.0, 0.0, 0.0, 1.0]);
++        assert_eq!(app.session.tools.background, [1.0, 1.0, 1.0, 1.0]);
++        app.run("tools.swapColors", json!({})).unwrap();
++        assert_eq!(app.session.tools.foreground, [1.0, 1.0, 1.0, 1.0]);
++        assert_eq!(app.session.tools.background, [0.0, 0.0, 0.0, 1.0]);
++
++        app.run("select.editInQuickMaskMode", json!({"on": false})).unwrap();
++        assert_eq!([app.session.tools.foreground, app.session.tools.background], image_colors);
++    }
++
+ }
