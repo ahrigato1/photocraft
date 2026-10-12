@@ -9,6 +9,7 @@ on:
       - "custom-0.7.1.patch"
       - "custom-0.7.1-custom.2.patch"
       - "custom-0.7.1-custom.3.patch"
+      - "custom-0.7.1-custom.4.patch"
 
 permissions:
   contents: read
@@ -35,6 +36,8 @@ jobs:
           git apply custom-0.7.1-custom.2.patch
           git apply --check custom-0.7.1-custom.3.patch
           git apply custom-0.7.1-custom.3.patch
+          git apply --check custom-0.7.1-custom.4.patch
+          git apply custom-0.7.1-custom.4.patch
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,7 +45,7 @@ jobs:
 
       - name: Set custom version
         shell: pwsh
-        run: cargo xtask version set 0.7.1-custom.3
+        run: cargo xtask version set 0.7.1-custom.4
 
       - name: Check out craft-fonts
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -74,6 +77,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: photocraft-0.7.1-custom.3-windows-x64
+          name: photocraft-0.7.1-custom.4-windows-x64
           path: dist/release/*
           if-no-files-found: error
