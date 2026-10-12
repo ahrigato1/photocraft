@@ -1,0 +1,319 @@
+diff --git a/crates/engine/src/channel_cmds.rs b/crates/engine/src/channel_cmds.rs
+index 321d0d1..428e162 100644
+--- a/crates/engine/src/channel_cmds.rs
++++ b/crates/engine/src/channel_cmds.rs
+@@ -17,7 +17,7 @@ use photocraft_color::{BlendMode, Color, ColorMode, PixelFormat, blend::blend_ch
+ use photocraft_doc::{AlphaChannel, ColorIndicates, Document, Layer, LayerContent, LayerId};
+ use photocraft_geom::{Rect, TileCoord};
+ use photocraft_raster::{Surface, from_rgba, to_rgba};
+-use serde::Serialize;
++use serde::{Deserialize, Serialize};
+ use serde_json::{Value, json};
+ 
+ use crate::commands::CommandSpec;
+@@ -95,7 +95,7 @@ impl ChannelView {
+ }
+ 
+ /// Session-wide Quick Mask Options (double-click the Quick Mask button in Photoshop).
+-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
++#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct QuickMaskOptions {
+     pub color: Color,
+@@ -1266,6 +1266,10 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
+                 return Err(bad(cmd, "Quick Mask can't be a spot channel"));
+             }
+             s.quick_mask_options = QuickMaskOptions { color: probe.color, opacity: probe.opacity, indicates: probe.indicates };
++            // Keep Quick Mask Options across launches, like Photoshop. Preferences autosave notices
++            // this revision and writes it through the normal settings path.
++            let saved = s.quick_mask_options;
++            s.prefs.edit(|prefs| prefs.quick_mask = saved);
+             if s.active().is_some_and(|d| d.doc.quick_mask.is_some()) {
+                 let o = s.quick_mask_options;
+                 s.edit("Quick Mask Options", |doc, _| {
+diff --git a/crates/engine/src/prefs.rs b/crates/engine/src/prefs.rs
+index ac5f62b..510c17b 100644
+--- a/crates/engine/src/prefs.rs
++++ b/crates/engine/src/prefs.rs
+@@ -923,6 +923,9 @@ pub struct Preferences {
+     pub shortcuts: BTreeMap<String, String>,
+     pub menus: MenuCustomization,
+     pub toolbar: ToolbarCustomization,
++    /// Quick Mask Options (double-click the toolbar button): overlay colour, opacity and whether
++    /// the overlay indicates masked or selected areas. This is app-wide and persists across launches.
++    pub quick_mask: crate::channel_cmds::QuickMaskOptions,
+     /// Edit › Check Spelling: words added to the dictionary ("Add").
+     pub user_dictionary: Vec<String>,
+     /// Window › Workspace › New Workspace…: saved layouts by name (JSON owned by the shell).
+@@ -1435,6 +1438,7 @@ impl Session {
+             st.history.trim(&st.doc);
+         }
+         photocraft_compose::set_effect_cache_budget(budget << 20);
++        self.quick_mask_options = self.prefs().quick_mask;
+         crate::plugin_cmds::sync_prefs(self);
+     }
+ 
+diff --git a/crates/engine/src/prefs/tests.rs b/crates/engine/src/prefs/tests.rs
+index bee5a08..3483778 100644
+--- a/crates/engine/src/prefs/tests.rs
++++ b/crates/engine/src/prefs/tests.rs
+@@ -553,3 +553,26 @@ fn ruler_units_round_to_their_own_decimal_places() {
+     let r = super::UnitsAndRulers { rulers: Unit::Inches, ..Default::default() };
+     assert_eq!(r.format(100.0, 300.0, 1500.0), "0.333");
+ }
++
++#[test]
++fn quick_mask_options_persist_across_sessions() {
++    use photocraft_doc::ColorIndicates;
++
++    let mut s = Session::new();
++    s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
++    s.execute(
++        "channel.options",
++        json!({"channel": "quickMask", "color": "#123456", "opacity": 37, "indicates": "selected"}),
++    )
++    .unwrap();
++
++    let saved = s.prefs_to_json();
++    let mut restored = Session::new();
++    restored.load_prefs_json(&saved).unwrap();
++    assert_eq!(restored.quick_mask_options.indicates, ColorIndicates::SelectedAreas);
++    assert!((restored.quick_mask_options.opacity - 0.37).abs() < 1e-6);
++    let rgb = restored.quick_mask_options.color.to_rgb();
++    assert!((rgb[0] - 0x12 as f32 / 255.0).abs() < 1e-6);
++    assert!((rgb[1] - 0x34 as f32 / 255.0).abs() < 1e-6);
++    assert!((rgb[2] - 0x56 as f32 / 255.0).abs() < 1e-6);
++}
+diff --git a/crates/ui-egui/src/dialogs.rs b/crates/ui-egui/src/dialogs.rs
+index c4a700a..9b79500 100644
+--- a/crates/ui-egui/src/dialogs.rs
++++ b/crates/ui-egui/src/dialogs.rs
+@@ -222,6 +222,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
+                     crate::color_picker_ui::take_add_swatch(app, &mut fields);
+                 }
+                 DialogKind::Command if crate::color_range_ui::owns(&fields) => crate::color_range_ui::body(app, ui, &mut fields),
++                DialogKind::Command if crate::quick_mask_ui::owns(&fields) => crate::quick_mask_ui::body(ui, &mut fields),
+                 DialogKind::Command if crate::prefs_ui::owns(&fields) => crate::prefs_ui::body(app, ui, &mut fields),
+                 DialogKind::Command if fields.contains_key("__export") => crate::export_dialog::body(app, ui, &mut fields),
+                 // Image Size and Canvas Size open on Width, selected (#2329).
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 0adf31b..9bb8d99 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -121,6 +121,7 @@ pub mod pixel_grid;
+ pub mod plugin_ui;
+ pub mod point_curve;
+ pub mod prefs_ui;
++pub mod quick_mask_ui;
+ pub mod preset_files_ui;
+ pub mod preset_panels;
+ pub mod press_menu;
+@@ -496,6 +497,12 @@ pub struct PhotocraftApp {
+     pub(crate) drop_canvas_rect: Option<egui::Rect>,
+     /// The document tab strip last frame: a drop there opens the file at the slot under it.
+     pub(crate) tab_strip: Option<canvas::TabStrip>,
++    /// A toolbar Quick Mask click held briefly so a second click can open Quick Mask Options
++    /// without the first click toggling Quick Mask mode.
++    quick_mask_single_click_at: Option<f64>,
++    /// Windows fallback for a winit/egui edge case where file-hover events arrive but the final
++    /// dropped-file event does not. We only synthesize an open on the empty workspace.
++    windows_hovered_drop_paths: Vec<String>,
+     /// Files dropped on the canvas still to place, one Free Transform at a time.
+     pub(crate) drop_places: std::collections::VecDeque<egui::DroppedFileHandle>,
+     /// The document each of `ui.views` belongs to, as of the last [`Self::sync_views`].
+@@ -662,6 +669,8 @@ impl PhotocraftApp {
+             ppp: 1.0,
+             drop_canvas_rect: None,
+             tab_strip: None,
++            quick_mask_single_click_at: None,
++            windows_hovered_drop_paths: Vec::new(),
+             drop_places: Default::default(),
+             view_docs: Vec::new(),
+             fps: 0.0,
+@@ -1386,13 +1395,43 @@ impl eframe::App for PhotocraftApp {
+         self.drain_os_events(ctx);
+         // While files are dragged over the window it gets no pointer events: keep frames coming so
+         // the tab strip can follow the pointer.
+-        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
++        let hovered_paths: Vec<String> = ctx.input(|i| {
++            i.raw
++                .hovered_files
++                .iter()
++                .filter_map(|f| f.path.as_ref())
++                .map(|p| p.to_string_lossy().to_string())
++                .collect()
++        });
++        if !hovered_paths.is_empty() {
+             ctx.request_repaint();
++            // Some Windows configurations can deliver HoveredFile but lose the final DroppedFile
++            // through winit 0.30. Remember those paths so an empty-workspace drop can still open
++            // like File > Open. Existing-document drops keep the normal winit routing.
++            if cfg!(target_os = "windows") && self.session.documents().is_empty() {
++                self.windows_hovered_drop_paths = hovered_paths.clone();
++            }
+         }
+         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+         if !dropped.is_empty() {
++            self.windows_hovered_drop_paths.clear();
+             let at = self.services.cursor_pos.as_mut().and_then(|f| f(ctx));
+             self.open_dropped(ctx, dropped, at);
++        } else if cfg!(target_os = "windows")
++            && hovered_paths.is_empty()
++            && !self.windows_hovered_drop_paths.is_empty()
++            && self.session.documents().is_empty()
++        {
++            // A drag leaving the window also clears hovered_files. Only synthesize the open when
++            // the OS pointer is still inside PhotoCraft, which distinguishes the common leave case
++            // from a release over the empty workspace. Ctrl+V remains the fallback if the platform
++            // supplies neither hover nor drop events.
++            let at = self.services.cursor_pos.as_mut().and_then(|f| f(ctx));
++            let paths = std::mem::take(&mut self.windows_hovered_drop_paths);
++            if at.is_some_and(|p| ctx.content_rect().contains(p)) {
++                log::info!("opening {} file(s) from Windows hover/drop fallback", paths.len());
++                self.open_paths(&paths);
++            }
+         }
+         self.place_next_dropped(ctx);
+         // The control transport wakes the UI on arrival (ctx.request_repaint); only poll while a
+diff --git a/crates/ui-egui/src/panels.rs b/crates/ui-egui/src/panels.rs
+index 291c160..577629d 100644
+--- a/crates/ui-egui/src/panels.rs
++++ b/crates/ui-egui/src/panels.rs
+@@ -259,16 +259,32 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+ 
+                     ui.with_layout(layout, |ui| {
+                         let quick_mask = app.session.active().is_some_and(|s| s.doc.quick_mask.is_some());
+-                        if icons::button(
++                        let quick_mask_button = icons::button(
+                             ui,
+                             "square-dashed",
+                             bx,
+                             quick_mask,
+                             if quick_mask { tl!("Edit in Standard Mode  (Q)") } else { tl!("Edit in Quick Mask Mode  (Q)") },
+-                        )
+-                        .clicked()
+-                        {
++                        );
++                        // Photoshop parity: double-click opens Quick Mask Options without changing mode.
++                        // Hold a single click for egui's 0.30 s double-click window; otherwise the first
++                        // click of a double-click would already toggle Quick Mask before we can know it is a double.
++                        let now = ui.input(|i| i.time);
++                        if quick_mask_button.double_clicked() {
++                            app.quick_mask_single_click_at = None;
++                            crate::quick_mask_ui::open(app);
++                        } else if quick_mask_button.clicked() {
++                            if app.quick_mask_single_click_at.take().is_some_and(|t0| now - t0 > 0.30) {
++                                let _ = crate::menus::invoke(app, &ctx, "select.editInQuickMaskMode", json!({}));
++                            }
++                            app.quick_mask_single_click_at = Some(now);
++                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(310));
++                        } else if app.quick_mask_single_click_at.is_some_and(|t0| now - t0 > 0.30) {
++                            app.quick_mask_single_click_at = None;
+                             let _ = crate::menus::invoke(app, &ctx, "select.editInQuickMaskMode", json!({}));
++                        } else if let Some(t0) = app.quick_mask_single_click_at {
++                            let remaining = (0.31 - (now - t0)).max(0.001);
++                            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+                         }
+                         let sm = icons::button(ui, "app-window", bx, false, tl!("Change Screen Mode  (F)"));
+                         paint_toolbar_flyout_indicator(ui, &t, &sm);
+diff --git a/crates/ui-egui/src/quick_mask_ui.rs b/crates/ui-egui/src/quick_mask_ui.rs
+new file mode 100644
+index 0000000..877a5d4
+--- /dev/null
++++ b/crates/ui-egui/src/quick_mask_ui.rs
+@@ -0,0 +1,95 @@
++//! Photoshop-style Quick Mask Options opened by double-clicking the toolbar's Quick Mask button.
++//!
++//! The engine already owns the actual Quick Mask settings (`channel.options {channel:"quickMask"}`).
++//! This module only supplies the small dedicated dialog and feeds that command on OK.
++
++use serde_json::{Map, Value, json};
++
++use crate::PhotocraftApp;
++use crate::state::DialogKind;
++
++const MARKER: &str = "__quickMaskOptions";
++
++/// Open Quick Mask Options with the current session values.
++pub fn open(app: &mut PhotocraftApp) -> u64 {
++    let o = app.session.quick_mask_options;
++    let mut fields = Map::new();
++    fields.insert(MARKER.into(), json!(true));
++    fields.insert("__label".into(), json!("Quick Mask Options"));
++    fields.insert("__command".into(), json!("channel.options"));
++    fields.insert("channel".into(), json!("quickMask"));
++    fields.insert(
++        "indicates".into(),
++        json!(match o.indicates {
++            photocraft_doc::ColorIndicates::MaskedAreas => "masked",
++            photocraft_doc::ColorIndicates::SelectedAreas => "selected",
++        }),
++    );
++    fields.insert("color".into(), json!(crate::color_picker_ui::hex(o.color.to_rgb())));
++    fields.insert("opacity".into(), json!((o.opacity * 100.0).round()));
++    app.ui.open_dialog(DialogKind::Command, fields)
++}
++
++pub fn owns(fields: &Map<String, Value>) -> bool {
++    fields.get(MARKER).and_then(Value::as_bool) == Some(true)
++}
++
++/// The compact Photoshop-style body: Color Indicates, overlay colour and opacity.
++pub fn body(ui: &mut egui::Ui, fields: &mut Map<String, Value>) {
++    ui.label(tl!("Color Indicates:"));
++    ui.add_space(2.0);
++
++    let current = fields.get("indicates").and_then(Value::as_str).unwrap_or("selected");
++    let mut indicates = current.to_string();
++    if ui.radio(indicates == "masked", tl!("Masked Areas")).clicked() {
++        indicates = "masked".into();
++    }
++    if ui.radio(indicates == "selected", tl!("Selected Areas")).clicked() {
++        indicates = "selected".into();
++    }
++    fields.insert("indicates".into(), json!(indicates));
++
++    ui.add_space(10.0);
++    crate::widgets::hairline(ui);
++    ui.add_space(10.0);
++
++    ui.horizontal(|ui| {
++        ui.label(tl!("Color:"));
++        let rgb = fields
++            .get("color")
++            .and_then(Value::as_str)
++            .and_then(crate::color_picker_ui::parse_hex)
++            .unwrap_or([1.0, 0.0, 0.0]);
++        let mut bytes = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
++        if crate::widgets::color_edit_button_srgb(ui, &mut bytes).changed() {
++            let rgb = bytes.map(|v| f32::from(v) / 255.0);
++            fields.insert("color".into(), json!(crate::color_picker_ui::hex(rgb)));
++        }
++
++        ui.add_space(18.0);
++        ui.label(tl!("Opacity:"));
++        let mut opacity = fields.get("opacity").and_then(Value::as_f64).unwrap_or(50.0) as f32;
++        if ui.add(egui::DragValue::new(&mut opacity).range(0.0..=100.0).speed(1.0).suffix(" %")).changed() {
++            fields.insert("opacity".into(), json!(opacity.clamp(0.0, 100.0)));
++        }
++    });
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use photocraft_doc::ColorIndicates;
++
++    #[test]
++    fn dialog_starts_from_the_session_quick_mask_options() {
++        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
++        app.session.quick_mask_options.indicates = ColorIndicates::SelectedAreas;
++        app.session.quick_mask_options.opacity = 0.37;
++        let id = open(&mut app);
++        let f = &app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields;
++        assert!(owns(f));
++        assert_eq!(f["indicates"], "selected");
++        assert_eq!(f["opacity"], 37.0);
++        assert_eq!(f["channel"], "quickMask");
++    }
++}
