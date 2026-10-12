@@ -1,0 +1,172 @@
+diff --git a/crates/doc/src/lib.rs b/crates/doc/src/lib.rs
+index 5d6ce28..eaab55a 100644
+--- a/crates/doc/src/lib.rs
++++ b/crates/doc/src/lib.rs
+@@ -799,6 +799,9 @@ pub struct Document {
+     /// Select › Edit in Quick Mask Mode: the temporary "Quick Mask" channel while the mode is on.
+     /// Part of the document so entering and leaving are history steps (as in Photoshop).
+     pub quick_mask: Option<AlphaChannel>,
++    /// Quick Mask was entered with no selection, so an untouched empty mask can round-trip as
++    /// no selection while a real Select All remains distinct.
++    pub quick_mask_unselected: bool,
+     /// Patterns stored with the document (PSD `Patt`/`Pat2`/`Pat3`): those its layers use, plus
+     /// any imported with it.
+     pub patterns: Vec<Pattern>,
+@@ -850,6 +853,7 @@ impl Document {
+             work_path: None,
+             clipping_path: None,
+             quick_mask: None,
++            quick_mask_unselected: false,
+             patterns: Vec::new(),
+             color_table: None,
+             duotone: None,
+diff --git a/crates/engine/src/channel_cmds.rs b/crates/engine/src/channel_cmds.rs
+index 428e162..62a4162 100644
+--- a/crates/engine/src/channel_cmds.rs
++++ b/crates/engine/src/channel_cmds.rs
+@@ -842,27 +842,39 @@ fn load_selection(s: &mut Session, p: &Value) -> Result<Value> {
+ // ---------------------------------------------------------------------------------------------
+ // Quick Mask
+ 
+-/// Quick Mask channel for the current selection: white where selected; no selection = an empty
+-/// mask (nothing masked), as in Photoshop.
++/// Quick Mask channel for the current selection: white where selected. No selection starts with
++/// no visible overlay: white for Masked Areas and black for Selected Areas. The document flag
++/// keeps that empty start distinct from a real Select All.
+ fn quick_mask_from(doc: &Document, o: &QuickMaskOptions) -> AlphaChannel {
+     let area = doc.bounds();
+     let fmt = channel_format(doc);
+     let surface = match &doc.selection {
+         Some(s) => plane_surface(&sel::mask_from_surface(Some(s), area), area, fmt),
+-        None => {
+-            let mut s = Surface::new(fmt);
+-            s.fill_rect(area, &[1.0]);
+-            s
+-        }
++        None => unselected_surface(area, fmt, o.indicates),
+     };
+     AlphaChannel { color: o.color, opacity: o.opacity, indicates: o.indicates, ..AlphaChannel::new("Quick Mask", surface) }
+ }
+ 
+-/// The selection a Quick Mask channel turns back into (an untouched or all-white mask = none).
++/// The colourless, nothing-selected Quick Mask for the current Color Indicates mode.
++fn unselected_surface(area: Rect, fmt: PixelFormat, indicates: ColorIndicates) -> Surface {
++    let mut s = Surface::new(fmt);
++    if indicates != ColorIndicates::SelectedAreas {
++        s.fill_rect(area, &[1.0]);
++    }
++    s
++}
++
++/// Every pixel is effectively `target` at 8-bit precision.
++fn uniform(vals: &[f32], target: f32) -> bool {
++    vals.iter().all(|v| (v - target).abs() <= 0.5 / 255.0)
++}
++
++/// The selection a Quick Mask turns back into. An untouched no-selection Masked Areas start is
++/// all white and must remain no selection; a genuine Select All remains distinguishable.
+ fn selection_from(doc: &Document, ch: &AlphaChannel) -> Option<Surface> {
+     let area = doc.bounds();
+     let vals = read_plane(&ch.surface, area);
+-    if vals.iter().all(|v| *v >= 1.0 - 0.5 / 255.0) {
++    if doc.quick_mask_unselected && ch.indicates != ColorIndicates::SelectedAreas && uniform(&vals, 1.0) {
+         return None;
+     }
+     sel::combine(None, &vals, area, SelectionMode::Replace)
+@@ -878,6 +890,7 @@ fn quick_mask(s: &mut Session, p: &Value) -> Result<Value> {
+     if want {
+         s.edit("Edit in Quick Mask", |doc, _| {
+             doc.quick_mask = Some(quick_mask_from(doc, &opts));
++            doc.quick_mask_unselected = doc.selection.is_none();
+             doc.selection = None;
+             Ok(())
+         })?;
+@@ -1273,7 +1286,18 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
+             if s.active().is_some_and(|d| d.doc.quick_mask.is_some()) {
+                 let o = s.quick_mask_options;
+                 s.edit("Quick Mask Options", |doc, _| {
++                    let area = doc.bounds();
++                    let fmt = channel_format(doc);
++                    let unselected = doc.quick_mask_unselected;
+                     if let Some(q) = &mut doc.quick_mask {
++                        // If this was entered with no selection and is still untouched, changing
++                        // Color Indicates should keep it visually empty instead of filling red.
++                        if unselected && q.indicates != o.indicates {
++                            let empty = if q.indicates == ColorIndicates::SelectedAreas { 0.0 } else { 1.0 };
++                            if uniform(&read_plane(&q.surface, area), empty) {
++                                q.surface = unselected_surface(area, fmt, o.indicates);
++                            }
++                        }
+                         q.color = o.color;
+                         q.opacity = o.opacity;
+                         q.indicates = o.indicates;
+diff --git a/crates/engine/src/channel_cmds/tests.rs b/crates/engine/src/channel_cmds/tests.rs
+index 9a9b710..9663e78 100644
+--- a/crates/engine/src/channel_cmds/tests.rs
++++ b/crates/engine/src/channel_cmds/tests.rs
+@@ -284,6 +284,19 @@ fn quick_mask_without_selection_and_options() {
+     // Leaving an untouched Quick Mask leaves no selection.
+     s.execute("select.editInQuickMaskMode", json!({"on": false})).unwrap();
+     assert!(doc(&s).selection.is_none());
++
++    // Selected Areas with no selection must also start visually empty: its channel is black,
++    // not the all-white value that would tint the whole canvas red.
++    s.execute("channel.options", json!({"channel": "quickMask", "indicates": "selected"})).unwrap();
++    s.execute("select.editInQuickMaskMode", json!({"on": true})).unwrap();
++    let q = doc(&s).quick_mask.as_ref().unwrap();
++    assert_eq!(q.indicates, ColorIndicates::SelectedAreas);
++    assert!(q.surface.pixel(10, 10)[0] < 0.01, "Selected Areas empty start should be black");
++    s.execute("select.editInQuickMaskMode", json!({"on": false})).unwrap();
++    assert!(doc(&s).selection.is_none());
++
++    // Put the original Masked Areas mode back for the existing filter assertions below.
++    s.execute("channel.options", json!({"channel": "quickMask", "indicates": "masked"})).unwrap();
+     // A filter in Quick Mask edits the mask.
+     s.execute("select.editInQuickMaskMode", json!({})).unwrap();
+     s.execute("paint.stroke", json!({"points": [[10, 10]], "size": 12, "hardness": 1.0, "color": "#000000"})).unwrap();
+diff --git a/crates/engine/src/layer_multi_cmds.rs b/crates/engine/src/layer_multi_cmds.rs
+index 5db8f52..4c80723 100644
+--- a/crates/engine/src/layer_multi_cmds.rs
++++ b/crates/engine/src/layer_multi_cmds.rs
+@@ -564,6 +564,7 @@ fn doc_pixels_equal(a: &Document, b: &Document) -> bool {
+         work_path: _,
+         clipping_path: _,
+         quick_mask,
++        quick_mask_unselected: _,
+         patterns,
+         color_table,
+         duotone,
+diff --git a/crates/format/src/convert.rs b/crates/format/src/convert.rs
+index 608b2bf..3361e2a 100644
+--- a/crates/format/src/convert.rs
++++ b/crates/format/src/convert.rs
+@@ -242,6 +242,7 @@ pub(crate) fn doc_m(d: &Document, sink: &mut dyn Sink) -> DocM {
+         work_path: d.work_path.clone(),
+         clipping_path: d.clipping_path.clone(),
+         quick_mask: d.quick_mask.as_ref().map(|c| channel_m(c, sink)),
++        quick_mask_unselected: d.quick_mask_unselected,
+         patterns: d
+             .patterns
+             .iter()
+@@ -602,6 +603,7 @@ impl Loader<'_> {
+             work_path: m.work_path.clone(),
+             clipping_path: m.clipping_path.clone(),
+             quick_mask,
++            quick_mask_unselected: m.quick_mask_unselected,
+             patterns,
+             color_table: m.color_table.clone(),
+             duotone: m.duotone.clone(),
+diff --git a/crates/format/src/manifest.rs b/crates/format/src/manifest.rs
+index 6b07ee4..4f0c93d 100644
+--- a/crates/format/src/manifest.rs
++++ b/crates/format/src/manifest.rs
+@@ -59,6 +59,9 @@ pub struct DocM {
+     /// The temporary Quick Mask channel (saved while Quick Mask mode is on).
+     #[serde(default)]
+     pub quick_mask: Option<ChannelM>,
++    /// Quick Mask was entered with no selection.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub quick_mask_unselected: bool,
+     /// Patterns stored with the document.
+     #[serde(default)]
+     pub patterns: Vec<PatternM>,
