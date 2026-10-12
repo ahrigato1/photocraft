@@ -57,7 +57,7 @@ jobs:
 
       - name: Fast patch sanity check
         shell: pwsh
-        run: cargo fmt --all -- --check
+        run: git diff --check
 
       - name: Install WiX
         shell: pwsh
