@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/custom-windows-x64.yml"
       - "custom-0.7.1.patch"
+      - "custom-0.7.1-custom.2.patch"
 
 permissions:
   contents: read
@@ -24,11 +25,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply custom patch
+      - name: Apply custom patches
         shell: pwsh
         run: |
           git apply --check custom-0.7.1.patch
           git apply custom-0.7.1.patch
+          git apply --check custom-0.7.1-custom.2.patch
+          git apply custom-0.7.1-custom.2.patch
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -36,7 +39,7 @@ jobs:
 
       - name: Set custom version
         shell: pwsh
-        run: cargo xtask version set 0.7.1-custom.1
+        run: cargo xtask version set 0.7.1-custom.2
 
       - name: Check out craft-fonts
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -47,7 +50,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: custom-windows-x64
+          key: custom-windows-x64-v2
 
       - name: Install WiX
         shell: pwsh
@@ -60,6 +63,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo test --locked -p photocraft-engine quick_mask_options_persist_across_sessions
+          cargo test --locked -p photocraft-engine quick_mask_selected_areas_reverses_black_white_paint_polarity
           cargo test --locked -p photocraft-ui-egui quick_mask_ui
           cargo check --locked -p photocraft
 
@@ -72,6 +76,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: photocraft-0.7.1-custom.1-windows-x64
+          name: photocraft-0.7.1-custom.2-windows-x64
           path: dist/release/*
           if-no-files-found: error
