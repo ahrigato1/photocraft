@@ -1,0 +1,142 @@
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -620,6 +620,9 @@ pub struct PhotocraftApp {
+     /// Where each document was last saved or exported to through a dialog (#1826): its next Save
+     /// As or export dialog starts there rather than beside the document. Session-only.
+     pub(crate) save_dirs: HashMap<photocraft_doc::DocId, std::path::PathBuf>,
++    /// Most recent folder chosen by any Save As / export dialog. Custom workflow preference:
++    /// new tabs inherit this folder instead of jumping back beside each source image.
++    pub(crate) last_save_dir: Option<std::path::PathBuf>,
+     /// Set once the user has agreed to quit, so the resulting close request goes through.
+     pub(crate) allow_close: bool,
+@@ -716,6 +719,7 @@ impl PhotocraftApp {
+             file_dialog: None,
+             tiff_options: None,
+             save_dirs: HashMap::new(),
++            last_save_dir: None,
+             allow_close: false,
+             stylus: Default::default(),
+             background_jobs: false,
+diff --git a/crates/ui-egui/src/file_dialog.rs b/crates/ui-egui/src/file_dialog.rs
+--- a/crates/ui-egui/src/file_dialog.rs
++++ b/crates/ui-egui/src/file_dialog.rs
+@@ -126,9 +126,11 @@ impl PhotocraftApp {
+         let open: Vec<_> = self.session.documents().iter().map(|d| d.doc.id).collect();
+         self.save_dirs.retain(|id, _| open.contains(id));
+         if suggested.parent().is_some_and(|p| p.as_os_str().is_empty())
+-            && let Some(dir) = doc
+-                .and_then(|d| self.save_dirs.get(&d).cloned())
++            && let Some(dir) = self
++                .last_save_dir
++                .clone()
++                .or_else(|| doc.and_then(|d| self.save_dirs.get(&d).cloned()))
+                 .or_else(|| self.session.active().and_then(|d| d.path.as_deref()).and_then(|p| std::path::Path::new(p).parent()).map(Path::to_path_buf))
+         {
+             suggested = dir.join(suggested);
+@@ -138,10 +140,11 @@ impl PhotocraftApp {
+             FileDialogAnswer::SaveTo(path) => {
+                 let path = Self::lowercased_extension(app, path);
+                 // The web answers a download name, which has no folder to remember.
+-                if let Some(doc) = doc
+-                    && let Some(dir) = Path::new(&path).parent().filter(|p| !p.as_os_str().is_empty())
+-                {
+-                    app.save_dirs.insert(doc, dir.to_path_buf());
++                if let Some(dir) = Path::new(&path).parent().filter(|p| !p.as_os_str().is_empty()) {
++                    let dir = dir.to_path_buf();
++                    app.last_save_dir = Some(dir.clone());
++                    if let Some(doc) = doc {
++                        app.save_dirs.insert(doc, dir);
++                    }
+                 }
+                 then(app, path)
+             }
+diff --git a/crates/ui-egui/src/shortcuts.rs b/crates/ui-egui/src/shortcuts.rs
+--- a/crates/ui-egui/src/shortcuts.rs
++++ b/crates/ui-egui/src/shortcuts.rs
+@@ -421,10 +421,6 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
+     if crate::crop_shield::keys(app, ctx) {
+         return;
+     }
+-    // ... and I fills W x H x Resolution from the document (Front Image, #2443).
+-    if crate::crop_size::keys(app, ctx) {
+-        return;
+-    }
+     // Single-key tools (no modifiers). D and X (`tools.defaultColors` / `tools.swapColors`) and the
+     // brush keys [ ] ⇧[ ⇧] (`tools.decreaseBrushSize`…) are commands, dispatched above with any
+     // Keyboard Shortcuts override.
+@@ -478,22 +474,34 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
+         }
+         return;
+     }
+-    // Tool keys; pressing the key of the current group cycles within it. With Preferences ›
+-    // Tools › Use Shift Key for Tool Switch, only ⇧+key cycles and the plain key keeps the
+-    // group's current tool. From another group, the key picks the group's last-used tool.
+-    let shift_switch = app.session.prefs().tools.use_shift_key_for_tool_switch;
+-    for t in Tool::ALL {
+-        let Some(k) = Key::from_name(&t.key().to_string()) else { continue };
+-        let cycle_shift = shift_switch && ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, k));
+-        if cycle_shift || pressed(k) {
+-            let group: Vec<Tool> = Tool::ALL.iter().copied().filter(|x| x.key() == t.key()).collect();
+-            app.ui.tool = match group.iter().position(|x| *x == app.ui.tool) {
+-                Some(i) if shift_switch && !cycle_shift => group[i],
+-                Some(i) => group[(i + 1) % group.len()],
+-                None => app.ui.group_tool(t.key()).unwrap_or(group[0]),
+-            };
++    // Custom workflow: a tool letter always selects the primary tool shown first in its toolbar
++    // flyout. Repeated presses never cycle into Pencil, Color Sampler, Slice, etc.; those remain
++    // available by clicking/right-clicking the toolbar flyout.
++    let direct_tools = [
++        (Key::V, Tool::Move),
++        (Key::M, Tool::RectMarquee),
++        (Key::L, Tool::Lasso),
++        (Key::W, Tool::ObjectSelection),
++        (Key::C, Tool::Crop),
++        (Key::I, Tool::Eyedropper),
++        (Key::J, Tool::Remove),
++        (Key::B, Tool::Brush),
++        (Key::S, Tool::CloneStamp),
++        (Key::Y, Tool::HistoryBrush),
++        (Key::E, Tool::Eraser),
++        (Key::G, Tool::Gradient),
++        (Key::O, Tool::Dodge),
++        (Key::P, Tool::Pen),
++        (Key::T, Tool::Type),
++        (Key::A, Tool::PathSelection),
++        (Key::U, Tool::Rectangle),
++        (Key::H, Tool::Hand),
++        (Key::R, Tool::RotateView),
++        (Key::Z, Tool::Zoom),
++        (Key::K, Tool::Frame),
++    ];
++    for (key, tool) in direct_tools {
++        if pressed(key) {
++            app.ui.tool = tool;
+             return;
+         }
+     }
+diff --git a/crates/ui-egui/src/crop_ui.rs b/crates/ui-egui/src/crop_ui.rs
+--- a/crates/ui-egui/src/crop_ui.rs
++++ b/crates/ui-egui/src/crop_ui.rs
+@@ -612,6 +612,7 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool {
+             // A click outside the untouched default frame (no turn) leaves it the default.
+             let changed = !matches!(drag, CropDrag::Rotate { from, .. } | CropDrag::TurnImage { from, .. } if from == angle(app))
+                 && !matches!(drag, CropDrag::MoveImage { rect, .. } if app.ui.crop_rect == Some(rect));
++            let auto_commit = ok && changed && matches!(drag, CropDrag::Draw { .. } | CropDrag::Resize { .. });
+             if ok && changed {
+                 app.crop.default_frame = false;
+             }
+@@ -628,6 +629,13 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool {
+                 }
+                 _ => {}
+             }
++            // Custom workflow: drawing a crop or dragging one of its edges/corners commits on
++            // mouse release. This removes the extra pending-frame/Enter step used by stock
++            // PhotoCraft while keeping move/rotate gestures editable until explicitly committed.
++            if auto_commit {
++                crate::canvas::commit_crop(app);
++                return true;
++            }
+         }
+     }
+     crate::crop_mode::sync_frame(app);
