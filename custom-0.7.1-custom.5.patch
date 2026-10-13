@@ -1,7 +1,7 @@
 diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
 --- a/crates/ui-egui/src/lib.rs
 +++ b/crates/ui-egui/src/lib.rs
-@@ -620,6 +620,9 @@ pub struct PhotocraftApp {
+@@ -620,4 +620,7 @@ pub struct PhotocraftApp {
      /// Where each document was last saved or exported to through a dialog (#1826): its next Save
      /// As or export dialog starts there rather than beside the document. Session-only.
      pub(crate) save_dirs: HashMap<photocraft_doc::DocId, std::path::PathBuf>,
@@ -9,7 +9,6 @@ diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
 +    /// new tabs inherit this folder instead of jumping back beside each source image.
 +    pub(crate) last_save_dir: Option<std::path::PathBuf>,
      /// Set once the user has agreed to quit, so the resulting close request goes through.
-     pub(crate) allow_close: bool,
 @@ -716,6 +719,7 @@ impl PhotocraftApp {
              file_dialog: None,
              tiff_options: None,
@@ -21,7 +20,7 @@ diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
 diff --git a/crates/ui-egui/src/file_dialog.rs b/crates/ui-egui/src/file_dialog.rs
 --- a/crates/ui-egui/src/file_dialog.rs
 +++ b/crates/ui-egui/src/file_dialog.rs
-@@ -126,9 +126,11 @@ impl PhotocraftApp {
+@@ -126,8 +126,10 @@ impl PhotocraftApp {
          let open: Vec<_> = self.session.documents().iter().map(|d| d.doc.id).collect();
          self.save_dirs.retain(|id, _| open.contains(id));
          if suggested.parent().is_some_and(|p| p.as_os_str().is_empty())
@@ -34,7 +33,7 @@ diff --git a/crates/ui-egui/src/file_dialog.rs b/crates/ui-egui/src/file_dialog.
                  .or_else(|| self.session.active().and_then(|d| d.path.as_deref()).and_then(|p| std::path::Path::new(p).parent()).map(Path::to_path_buf))
          {
              suggested = dir.join(suggested);
-@@ -138,10 +140,11 @@ impl PhotocraftApp {
+@@ -138,10 +140,12 @@ impl PhotocraftApp {
              FileDialogAnswer::SaveTo(path) => {
                  let path = Self::lowercased_extension(app, path);
                  // The web answers a download name, which has no folder to remember.
@@ -65,10 +64,7 @@ diff --git a/crates/ui-egui/src/shortcuts.rs b/crates/ui-egui/src/shortcuts.rs
      // Single-key tools (no modifiers). D and X (`tools.defaultColors` / `tools.swapColors`) and the
      // brush keys [ ] ⇧[ ⇧] (`tools.decreaseBrushSize`…) are commands, dispatched above with any
      // Keyboard Shortcuts override.
-@@ -478,22 +474,34 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
-         }
-         return;
-     }
+@@ -478,17 +474,31 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
 -    // Tool keys; pressing the key of the current group cycles within it. With Preferences ›
 -    // Tools › Use Shift Key for Tool Switch, only ⇧+key cycles and the plain key keeps the
 -    // group's current tool. From another group, the key picks the group's last-used tool.
@@ -107,7 +103,6 @@ diff --git a/crates/ui-egui/src/shortcuts.rs b/crates/ui-egui/src/shortcuts.rs
 +        (Key::H, Tool::Hand),
 +        (Key::R, Tool::RotateView),
 +        (Key::Z, Tool::Zoom),
-+        (Key::K, Tool::Frame),
 +    ];
 +    for (key, tool) in direct_tools {
 +        if pressed(key) {
@@ -126,7 +121,7 @@ diff --git a/crates/ui-egui/src/crop_ui.rs b/crates/ui-egui/src/crop_ui.rs
              if ok && changed {
                  app.crop.default_frame = false;
              }
-@@ -628,6 +629,13 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool {
+@@ -628,5 +629,12 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool {
                  }
                  _ => {}
              }
