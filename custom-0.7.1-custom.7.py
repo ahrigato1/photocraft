@@ -125,7 +125,7 @@ new='''            if tool == Tool::Smudge {
                 let high = memory.smudge_high_strength.clamp(1.0, 100.0);
                 let toggle_key = memory.smudge_toggle_shortcut.clone();
                 if !toggle_key.is_empty()
-                    && !ui.ctx().wants_keyboard_input()
+                    && !ui.ctx().egui_wants_keyboard_input()
                     && let Some(shortcut) = crate::shortcuts::parse(&toggle_key)
                     && crate::shortcuts::consume(ui.ctx(), &shortcut)
                 {
