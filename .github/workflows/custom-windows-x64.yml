@@ -11,7 +11,7 @@ on:
       - "custom-0.7.1-custom.3.patch"
       - "custom-0.7.1-custom.4.patch"
       - "custom-0.7.1-custom.5.patch"
-      - "custom-0.7.1-custom.7.py"
+      - "custom-0.7.1-custom.6.py"
       - "custom-0.7.1-custom.7.py"
 
 permissions:
@@ -43,7 +43,7 @@ jobs:
           git apply custom-0.7.1-custom.4.patch
           git apply --check custom-0.7.1-custom.5.patch
           git apply custom-0.7.1-custom.5.patch
-          python custom-0.7.1-custom.7.py
+          python custom-0.7.1-custom.6.py
           python custom-0.7.1-custom.7.py
 
       - uses: dtolnay/rust-toolchain@stable
