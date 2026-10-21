@@ -54,19 +54,33 @@ jobs:
           sudo freshclam --verbose
           clamscan --version | tee verification/scanner-version.txt
 
-      - name: Scan extracted build outputs with ClamAV
+      - name: Scan Windows installer and unpacked portable files with ClamAV
         shell: bash
         run: |
           set -euo pipefail
-          clamscan --recursive --infected --verbose --scan-archive=yes \
-            --max-filesize=500M --max-scansize=1500M \
-            --alert-exceeds-max=yes distribution 2>&1 | tee verification/clamav-results.txt
-          echo "CLAMAV=completed, no signatures detected" >> verification/RESULTS.txt
+          mkdir -p portable_contents
+          i=0
+          while IFS= read -r -d '' archive; do
+            mkdir -p "portable_contents/$i"
+            unzip -qq "$archive" -d "portable_contents/$i"
+            i=$((i+1))
+          done < <(find distribution -type f -iname '*.zip' -print0)
+          echo "Scanning the MSI container separately" | tee verification/clamav-results.txt
+          while IFS= read -r -d '' msi; do
+            clamscan --infected --scan-archive=yes \
+              --max-scantime=300000 --max-filesize=500M --max-scansize=1500M \
+              --alert-exceeds-max=yes "$msi" 2>&1 | tee -a verification/clamav-results.txt
+          done < <(find distribution -type f -iname '*.msi' -print0)
+          echo "Scanning every unpacked portable file (avoids ZIP recursion timeout)" | tee -a verification/clamav-results.txt
+          clamscan --recursive --infected --scan-archive=no \
+            --max-scantime=300000 --max-filesize=500M --max-scansize=1500M \
+            --alert-exceeds-max=yes portable_contents 2>&1 | tee -a verification/clamav-results.txt
+          echo "CLAMAV=completed, no signatures detected; MSI and unpacked portable files scanned" >> verification/RESULTS.txt
           {
             echo "### custom.8 artifact audit"
             echo "- Exact artifact from the successful Windows release build: [run #12](https://github.com/ahrigato1/photocraft/actions/runs/39517367048)"
             echo "- MSI and portable ZIP found; ZIP integrity verified."
-            echo "- ClamAV scan completed without detections or scanner errors."
+            echo "- ClamAV scanned the MSI and each extracted portable file without detections or scanner errors."
             echo "- Binary SHA-256 hashes included in the downloadable verification report."
             echo "- This is a signature scan, not a proof of safety, and does not resolve Firefox's malware warning."
           } >> "$GITHUB_STEP_SUMMARY"
