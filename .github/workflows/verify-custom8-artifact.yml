@@ -1,0 +1,80 @@
+name: Verify custom.8 release artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["custom-0.7.1"]
+    paths:
+      - ".github/workflows/verify-custom8-artifact.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit-existing-artifact:
+    name: Verify published custom.8 artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download exact custom.8 build artifact from successful Windows run
+        uses: actions/download-artifact@v4
+        with:
+          repository: ahrigato1/photocraft
+          run-id: 39517367048
+          github-token: ${{ github.token }}
+          name: photocraft-0.7.1-custom.8-windows-x64
+          path: distribution
+
+      - name: Validate expected installer files, archives, and generate SHA256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          echo "SOURCE_RUN=https://github.com/ahrigato1/photocraft/actions/runs/39517367048" > verification/RESULTS.txt
+          echo "SOURCE_COMMIT=398b4d979cbb8d82490bcb892dd52eac61b05937" >> verification/RESULTS.txt
+          echo "Source artifact: photocraft-0.7.1-custom.8-windows-x64" >> verification/RESULTS.txt
+          find distribution -type f -printf '%P (%s bytes)\n' | sort | tee verification/files.txt
+          find distribution -type f -print0 | sort -z | xargs -0 sha256sum | tee verification/SHA256SUMS.txt
+          test -n "$(find distribution -type f -iname '*.msi' -print -quit)" || { echo "Expected MSI missing"; exit 1; }
+          test -n "$(find distribution -type f -iname '*.zip' -print -quit)" || { echo "Expected portable ZIP missing"; exit 1; }
+          while IFS= read -r -d '' f; do
+            echo "Verifying ZIP archive: $f"
+            unzip -tqq "$f"
+          done < <(find distribution -type f -iname '*.zip' -print0)
+          echo "CHECKS=installer and portable ZIP present; ZIP integrity check passed" >> verification/RESULTS.txt
+
+      - name: Install and update independent ClamAV malware scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y clamav clamav-freshclam
+          sudo systemctl stop clamav-freshclam.service 2>/dev/null || true
+          sudo freshclam --verbose
+          clamscan --version | tee verification/scanner-version.txt
+
+      - name: Scan extracted build outputs with ClamAV
+        shell: bash
+        run: |
+          set -euo pipefail
+          clamscan --recursive --infected --verbose --scan-archive=yes \
+            --max-filesize=500M --max-scansize=1500M \
+            --alert-exceeds-max=yes distribution 2>&1 | tee verification/clamav-results.txt
+          echo "CLAMAV=completed, no signatures detected" >> verification/RESULTS.txt
+          {
+            echo "### custom.8 artifact audit"
+            echo "- Exact artifact from the successful Windows release build: [run #12](https://github.com/ahrigato1/photocraft/actions/runs/39517367048)"
+            echo "- MSI and portable ZIP found; ZIP integrity verified."
+            echo "- ClamAV scan completed without detections or scanner errors."
+            echo "- Binary SHA-256 hashes included in the downloadable verification report."
+            echo "- This is a signature scan, not a proof of safety, and does not resolve Firefox's malware warning."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verification logs and hashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-custom8-verification-report
+          path: verification/
+          if-no-files-found: warn
