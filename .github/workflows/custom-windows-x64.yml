@@ -15,6 +15,7 @@ on:
       - "custom-0.7.1-custom.7.py"
       - "custom-0.7.1-custom.8.py"
       - "custom-0.7.1-custom.9.py"
+      - "custom-0.7.1-custom.10.py"
 
 permissions:
   contents: read
@@ -49,6 +50,7 @@ jobs:
           python custom-0.7.1-custom.7.py
           python custom-0.7.1-custom.8.py
           python custom-0.7.1-custom.9.py
+          python custom-0.7.1-custom.10.py
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,7 +58,7 @@ jobs:
 
       - name: Set custom version
         shell: pwsh
-        run: cargo xtask version set 0.7.1-custom.9
+        run: cargo xtask version set 0.7.1-custom.10
 
       - name: Check out craft-fonts
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -88,6 +90,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: photocraft-0.7.1-custom.9-windows-x64
+          name: photocraft-0.7.1-custom.10-windows-x64
           path: dist/release/*
           if-no-files-found: error
