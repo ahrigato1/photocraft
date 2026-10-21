@@ -92,3 +92,19 @@ jobs:
           name: photocraft-custom8-verification-report
           path: verification/
           if-no-files-found: warn
+
+      - name: Upload verified installable MSI
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-custom8-verified-MSI
+          path: distribution/*.msi
+          if-no-files-found: error
+
+      - name: Upload verified portable PhotoCraft ZIP
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-custom8-verified-portable
+          path: distribution/*portable.zip
+          if-no-files-found: error
